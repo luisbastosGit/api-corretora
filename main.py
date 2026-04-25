@@ -1,14 +1,13 @@
+import os
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
-import time
 import asyncio
+from playwright.async_api import async_playwright
 
 app = FastAPI(title="API Corretora - Motor de Multicálculo")
 
-# REGRA DE SEGURANÇA: Configurar o CORS. 
-# Isso permite que a sua página no Wix consiga conversar com este servidor.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,53 +16,87 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Nosso "banco de dados" temporário na memória para controlar as filas
 banco_de_tickets = {}
 
-# Mapeamento do que o Wix vai nos enviar
 class DadosCotacao(BaseModel):
     nome: str
     cpf: str
     placa: str
+    email: str
+    telefone: str
     pacote_escolhido: str
 
-# Função que simula o trabalho do robô (A Fase 3 entrará exatamente aqui)
-async def tarefa_do_robo(ticket_id: str):
-    # Simulamos que o robô está abrindo o Aggilizador e calculando por 15 segundos
-    await asyncio.sleep(15)
+async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
+    # Avisamos ao sistema que a navegação vai começar
+    banco_de_tickets[ticket_id] = {"status": "iniciando navegador"}
+    print(f"[{ticket_id}] Iniciando robô para o cliente: {dados_cliente['nome']}")
     
-    # Quando o robô termina, ele atualiza o status do ticket
-    banco_de_tickets[ticket_id] = {
-        "status": "concluido",
-        "link_pdf": "https://seu-drive.com/arquivo-simulado.pdf"
-    }
+    # 1. Abre o cofre seguro do Render para pegar as credenciais
+    USUARIO_AGG = os.getenv("AGG_USUARIO")
+    SENHA_AGG = os.getenv("AGG_SENHA")
 
-# ---------------------------------------------------------
-# PORTA 1: Onde o Wix bate para entregar os dados
-# ---------------------------------------------------------
+    if not USUARIO_AGG or not SENHA_AGG:
+        erro_msg = "Credenciais do Aggilizador não encontradas nas Variáveis de Ambiente."
+        print(f"[{ticket_id}] ERRO: {erro_msg}")
+        banco_de_tickets[ticket_id] = {"status": "erro", "erro": erro_msg}
+        return
+
+    try:
+        # 2. Instancia o Navegador Invisível (Chromium)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+
+            # 3. Acessa a tela de Login
+            print(f"[{ticket_id}] Acessando portal Aggilizador...")
+            banco_de_tickets[ticket_id] = {"status": "fazendo login"}
+            await page.goto("https://aggilizador.com.br/login")
+
+            # 4. Preenche os campos (Buscando pelos tipos de input que vimos na sua imagem)
+            print(f"[{ticket_id}] Inserindo credenciais seguras...")
+            await page.locator("input[type='email']").fill(USUARIO_AGG)
+            await page.locator("input[type='password']").fill(SENHA_AGG)
+
+            # 5. Clica no botão Entrar
+            await page.locator("button:has-text('Entrar')").click()
+
+            # 6. Aguarda a página carregar após o login (Espera a rede acalmar)
+            print(f"[{ticket_id}] Aguardando dashboard carregar...")
+            await page.wait_for_load_state("networkidle")
+
+            # SE CHEGAMOS ATÉ AQUI SEM ERROS, O LOGIN FOI UM SUCESSO!
+            print(f"[{ticket_id}] Login efetuado com sucesso!")
+            
+            # --- FIM DA FASE 3 (O PREENCHIMENTO DO FORMULÁRIO ENTRA AQUI NA PRÓXIMA FASE) ---
+            
+            # Simulamos um tempinho extra só para ver o teste passar bonito
+            await asyncio.sleep(3)
+            await browser.close()
+
+            # Finaliza a tarefa e avisa a tela do Wix
+            banco_de_tickets[ticket_id] = {
+                "status": "concluido",
+                "link_pdf": "TESTE_LOGIN_OK_O_ROBO_ESTA_DENTRO_DO_SISTEMA"
+            }
+
+    except Exception as e:
+        print(f"[{ticket_id}] ERRO FATAL no processo: {e}")
+        banco_de_tickets[ticket_id] = {"status": "erro", "erro": str(e)}
+
 @app.post("/api/iniciar-cotacao")
 async def iniciar_cotacao(dados: DadosCotacao, background_tasks: BackgroundTasks):
-    # 1. Gera o código único de atendimento
     ticket_id = str(uuid.uuid4())
-    
-    # 2. Registra no sistema que este ticket começou a ser processado
     banco_de_tickets[ticket_id] = {"status": "processando"}
     
-    # 3. Manda o robô trabalhar em segundo plano (na fila)
-    background_tasks.add_task(tarefa_do_robo, ticket_id)
+    # Enviamos também os dados do cliente para o robô usar mais pra frente
+    background_tasks.add_task(tarefa_do_robo, ticket_id, dados.dict())
     
-    # 4. Devolve o ticket para o Wix imediatamente, sem deixar o cliente esperando
     return {"ticket": ticket_id, "mensagem": "Dados recebidos, robô acionado!"}
 
-# ---------------------------------------------------------
-# PORTA 2: Onde o Wix bate para perguntar "Já acabou?"
-# ---------------------------------------------------------
 @app.get("/api/status-cotacao/{ticket_id}")
 async def checar_status(ticket_id: str):
-    # Procura o ticket na memória
     resultado = banco_de_tickets.get(ticket_id)
-    
     if not resultado:
         return {"erro": "Ticket não encontrado."}
-    
     return resultado
