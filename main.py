@@ -36,56 +36,54 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            # Criamos um contexto com um User-Agent comum para evitar bloqueios
-            context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            context = await browser.new_context()
             page = await context.new_page()
 
-            token_jwt = None
-
-            # Captura o token de forma mais agressiva em qualquer requisição de saída
-            async def interceptar_token(request):
-                nonlocal token_jwt
-                # Procuramos o cabeçalho de autorização em requisições para a API
-                if "api-prod" in request.url:
-                    auth = request.headers.get("authorization")
-                    if auth and "eyJ" in auth:
-                        token_jwt = auth
-                        print(f"[{ticket_id}] TOKEN CAPTURADO via: {request.url}")
-
-            page.on("request", interceptar_token)
-
             # --- LOGIN ---
-            print(f"[{ticket_id}] Fazendo login para capturar sessão...")
+            print(f"[{ticket_id}] Fazendo login...")
             await page.goto("https://aggilizador.com.br/login")
             await page.locator("input[type='email']").fill(USUARIO_AGG)
             await page.locator("input[type='password']").fill(SENHA_AGG)
             await page.locator("button:has-text('Entrar')").click()
             
-            # ESPERA ATIVA: Aguarda o token por até 30 segundos ou até a página mudar
-            for _ in range(30):
-                if token_jwt: break
-                await asyncio.sleep(1)
+            # Aguarda o redirecionamento pós-login para o Dashboard
+            await page.wait_for_url("**/cotacoes", timeout=30000)
+            print(f"[{ticket_id}] Dashboard alcançado. Extraindo credenciais da memória...")
+
+            # --- EXTRAÇÃO ATIVA DO TOKEN ---
+            # Este script busca o token no LocalStorage do navegador
+            token_jwt = await page.evaluate("""() => {
+                const authData = localStorage.getItem('auth-storage'); // Nome comum em apps Angular
+                if (authData) return JSON.parse(authData).token;
+                
+                // Plano B: Tentar todas as chaves do LocalStorage que pareçam JWT
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    const val = localStorage.getItem(key);
+                    if (val && val.includes('eyJ')) return val.replace(/\"/g, "");
+                }
+                return null;
+            }""")
 
             if not token_jwt:
-                # Se falhar, tentamos esperar o carregamento final da rede
-                await page.wait_for_load_state("networkidle")
-                if not token_jwt:
-                    raise Exception("O Token JWT não apareceu no tráfego de rede.")
+                raise Exception("Token JWT não encontrado no LocalStorage após login.")
 
-            print(f"[{ticket_id}] Autenticado com sucesso. Iniciando API...")
-            await browser.close() # Já temos o token, não precisamos mais do navegador
+            # Limpeza do token (garante que não tenha 'Bearer ' duplicado)
+            if not token_jwt.startswith("eyJ"):
+                 token_jwt = token_jwt.split(" ")[-1]
 
-            # --- CÁLCULO VIA API (HTTPX) ---
+            print(f"[{ticket_id}] Token extraído com sucesso!")
+            await browser.close()
+
+            # --- CÁLCULO VIA API ---
             banco_de_tickets[ticket_id] = {"status": "calculando"}
             async with httpx.AsyncClient() as client:
                 headers = {
-                    "authorization": token_jwt,
+                    "authorization": f"{token_jwt}",
                     "content-type": "application/json",
-                    "origin": "https://aggilizador.com.br",
-                    "referer": "https://aggilizador.com.br/"
+                    "origin": "https://aggilizador.com.br"
                 }
 
-                # Payload baseado no seu cURL anterior
                 payload = {
                     "cotacao": {
                         "segurado": {
@@ -98,7 +96,7 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                         },
                         "automoveis": [{
                             "placa": dados_cliente['placa'],
-                            "fipe": "0242349", # Valor temporário
+                            "fipe": "0242349",
                             "cepPernoite": "89703166"
                         }],
                         "tipo": 5,
@@ -119,9 +117,9 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                         "resultados": response.json(),
                         "link_pdf": "OK"
                     }
-                    print(f"[{ticket_id}] Sucesso total via API!")
+                    print(f"[{ticket_id}] Cálculo finalizado via API!")
                 else:
-                    raise Exception(f"Erro no cálculo: {response.status_code} - {response.text}")
+                    raise Exception(f"Erro API: {response.status_code} - {response.text}")
 
     except Exception as e:
         print(f"[{ticket_id}] ERRO: {e}")
