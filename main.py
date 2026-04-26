@@ -36,49 +36,56 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+            # Criamos um contexto com um User-Agent comum para evitar bloqueios
+            context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            page = await context.new_page()
 
             token_jwt = None
 
-            # Captura o token de autorização durante o login
+            # Captura o token de forma mais agressiva em qualquer requisição de saída
             async def interceptar_token(request):
                 nonlocal token_jwt
-                auth = request.headers.get("authorization")
-                if auth and "eyJ" in auth:
-                    token_jwt = auth
+                # Procuramos o cabeçalho de autorização em requisições para a API
+                if "api-prod" in request.url:
+                    auth = request.headers.get("authorization")
+                    if auth and "eyJ" in auth:
+                        token_jwt = auth
+                        print(f"[{ticket_id}] TOKEN CAPTURADO via: {request.url}")
 
             page.on("request", interceptar_token)
 
             # --- LOGIN ---
+            print(f"[{ticket_id}] Fazendo login para capturar sessão...")
             await page.goto("https://aggilizador.com.br/login")
             await page.locator("input[type='email']").fill(USUARIO_AGG)
             await page.locator("input[type='password']").fill(SENHA_AGG)
             await page.locator("button:has-text('Entrar')").click()
             
-            # Aguarda o token por até 10s
-            for _ in range(10):
+            # ESPERA ATIVA: Aguarda o token por até 30 segundos ou até a página mudar
+            for _ in range(30):
                 if token_jwt: break
                 await asyncio.sleep(1)
 
-            await browser.close()
-
             if not token_jwt:
-                raise Exception("Falha na captura do Token JWT.")
+                # Se falhar, tentamos esperar o carregamento final da rede
+                await page.wait_for_load_state("networkidle")
+                if not token_jwt:
+                    raise Exception("O Token JWT não apareceu no tráfego de rede.")
 
-            print(f"[{ticket_id}] Autenticado. Iniciando cálculos via API...")
+            print(f"[{ticket_id}] Autenticado com sucesso. Iniciando API...")
+            await browser.close() # Já temos o token, não precisamos mais do navegador
+
+            # --- CÁLCULO VIA API (HTTPX) ---
             banco_de_tickets[ticket_id] = {"status": "calculando"}
-
-            # --- CÁLCULO DIRETO VIA API ---
-            # Aqui usamos o 'httpx' para enviar o JSON que você capturou
             async with httpx.AsyncClient() as client:
                 headers = {
                     "authorization": token_jwt,
                     "content-type": "application/json",
-                    "origin": "https://aggilizador.com.br"
+                    "origin": "https://aggilizador.com.br",
+                    "referer": "https://aggilizador.com.br/"
                 }
 
-                # Montamos o corpo da requisição baseado no seu cURL
-                # Nota: Em um sistema real, automatizaremos a busca da FIPE antes deste passo
+                # Payload baseado no seu cURL anterior
                 payload = {
                     "cotacao": {
                         "segurado": {
@@ -87,11 +94,11 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                             "fone1": dados_cliente['telefone'],
                             "email": dados_cliente['email'],
                             "tipoPessoa": "F",
-                            "sexo": "M" # Padrão para teste
+                            "sexo": "M"
                         },
                         "automoveis": [{
                             "placa": dados_cliente['placa'],
-                            "fipe": "0242349", # Exemplo fixo da sua captura
+                            "fipe": "0242349", # Valor temporário
                             "cepPernoite": "89703166"
                         }],
                         "tipo": 5,
@@ -106,17 +113,15 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                     timeout=60.0
                 )
 
-                if response.status_code == 200:
-                    resultado = response.json()
-                    print(f"[{ticket_id}] Cálculo concluído com sucesso!")
+                if response.status_code in [200, 201]:
                     banco_de_tickets[ticket_id] = {
                         "status": "concluido",
-                        "resultados": resultado,
-                        "link_pdf": "GERADO_VIA_API"
+                        "resultados": response.json(),
+                        "link_pdf": "OK"
                     }
+                    print(f"[{ticket_id}] Sucesso total via API!")
                 else:
-                    print(f"[{ticket_id}] Erro no cálculo: {response.text}")
-                    raise Exception(f"Erro API: {response.status_code}")
+                    raise Exception(f"Erro no cálculo: {response.status_code} - {response.text}")
 
     except Exception as e:
         print(f"[{ticket_id}] ERRO: {e}")
