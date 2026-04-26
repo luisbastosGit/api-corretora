@@ -5,9 +5,8 @@ import httpx
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import async_playwright
 
-app = FastAPI(title="API Corretora - Motor de API Híbrido")
+app = FastAPI(title="API Corretora - Motor de Scraping Puro")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,101 +27,82 @@ class DadosCotacao(BaseModel):
     pacote_escolhido: str
 
 async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
-    banco_de_tickets[ticket_id] = {"status": "autenticando"}
+    banco_de_tickets[ticket_id] = {"status": "autenticando_api"}
     
     USUARIO_AGG = os.getenv("AGG_USUARIO")
     SENHA_AGG = os.getenv("AGG_SENHA")
 
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=["--disable-gpu", "--no-sandbox"])
-            context = await browser.new_context()
-            page = await context.new_page()
-
-            # Bloqueia lixo visual para salvar RAM
-            await page.route("**/*.{png,jpg,jpeg,gif,svg,woff,pdf,css}", lambda route: route.abort())
-
-            # --- LOGIN ---
-            print(f"[{ticket_id}] Acessando página de login...")
-            await page.goto("https://aggilizador.com.br/login", wait_until="domcontentloaded")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # --- PASSO 1: SCRAPING DE LOGIN (DIRETO NA API) ---
+            print(f"[{ticket_id}] Solicitando Token de Acesso via API...")
             
-            # Preenche usando type (mais lento/humano) em vez de fill
-            await page.locator("input[type='email']").type(USUARIO_AGG, delay=50)
-            await page.locator("input[type='password']").type(SENHA_AGG, delay=50)
+            payload_login = {
+                "email": USUARIO_AGG,
+                "password": SENHA_AGG,
+                "aplicacaoId": 4 # ID padrão do Aggilizador Web
+            }
             
-            print(f"[{ticket_id}] Disparando login via teclado...")
-            await page.keyboard.press("Enter")
+            # O Aggilizador usa este endpoint para validar logins
+            res_login = await client.post(
+                "https://api-prod.aggilizador.com.br/auth/login", 
+                json=payload_login
+            )
             
-            # Tenta capturar o token por 20 segundos
-            token_jwt = None
-            for i in range(20):
-                token_jwt = await page.evaluate("""() => {
-                    for (let i = 0; i < localStorage.length; i++) {
-                        const key = localStorage.key(i);
-                        const val = localStorage.getItem(key);
-                        if (val && val.includes('eyJ')) return val;
-                    }
-                    return null;
-                }""")
-                if token_jwt: break
-                await asyncio.sleep(1)
-
-            if not token_jwt:
-                # Se falhar, vamos ver se há mensagem de erro na tela
-                msg_erro = await page.locator(".mat-error, .alert").text_content() if await page.locator(".mat-error, .alert").count() > 0 else "Nenhuma msg visível"
-                raise Exception(f"Token não capturado. Erro na tela: {msg_erro}")
-
-            # Limpa o token se ele vier como objeto JSON
-            if '"token":"' in token_jwt:
-                import json
-                try: token_jwt = json.loads(token_jwt)['token']
-                except: pass
+            if res_login.status_code != 200:
+                raise Exception(f"Falha na autenticação API: {res_login.status_code}")
             
-            token_jwt = token_jwt.replace('"', '')
-            print(f"[{ticket_id}] Autenticado! Iniciando API de cálculo...")
-            await browser.close()
+            token_jwt = res_login.json().get("token")
+            print(f"[{ticket_id}] Autenticação via Scraping de API bem-sucedida!")
 
-            # --- CÁLCULO VIA API ---
+            # --- PASSO 2: SCRAPING DE CÁLCULO ---
             banco_de_tickets[ticket_id] = {"status": "calculando"}
-            async with httpx.AsyncClient() as client:
-                headers = {
-                    "authorization": f"Bearer {token_jwt}" if "eyJ" in token_jwt else token_jwt,
-                    "content-type": "application/json",
-                    "origin": "https://aggilizador.com.br"
+            
+            headers = {
+                "authorization": f"Bearer {token_jwt}",
+                "content-type": "application/json",
+                "origin": "https://aggilizador.com.br"
+            }
+
+            # Payload estruturado com base no seu cURL anterior
+            payload_calc = {
+                "cotacao": {
+                    "segurado": {
+                        "nome": dados_cliente['nome'],
+                        "cpfCnpj": dados_cliente['cpf'],
+                        "fone1": dados_cliente['telefone'],
+                        "email": dados_cliente['email'],
+                        "tipoPessoa": "F", "sexo": "M", "cep": "89703166"
+                    },
+                    "automoveis": [{
+                        "placa": dados_cliente['placa'],
+                        "fipe": "0242349", # Valor de referência do seu teste
+                        "cepPernoite": "89703166",
+                        "anoFabricacao": 2018, "anoModelo": 2019
+                    }],
+                    "tipo": 5, "ramo": 31
                 }
+            }
 
-                payload = {
-                    "cotacao": {
-                        "segurado": {
-                            "nome": dados_cliente['nome'],
-                            "cpfCnpj": dados_cliente['cpf'],
-                            "fone1": dados_cliente['telefone'],
-                            "email": dados_cliente['email'],
-                            "tipoPessoa": "F", "sexo": "M"
-                        },
-                        "automoveis": [{
-                            "placa": dados_cliente['placa'],
-                            "fipe": "0242349",
-                            "cepPernoite": "89703166",
-                            "anoFabricacao": 2018, "anoModelo": 2019
-                        }],
-                        "tipo": 5, "ramo": 31
-                    }
+            print(f"[{ticket_id}] Disparando multicalculo...")
+            res_calc = await client.post(
+                "https://api-prod.aggilizador.com.br/calculo/calcularV2",
+                json=payload_calc,
+                headers=headers
+            )
+
+            if res_calc.status_code in [200, 201]:
+                print(f"[{ticket_id}] Cálculo finalizado com sucesso!")
+                banco_de_tickets[ticket_id] = {
+                    "status": "concluido",
+                    "resultados": res_calc.json(),
+                    "mensagem": "Cotação processada em tempo recorde."
                 }
-
-                response = await client.post(
-                    "https://api-prod.aggilizador.com.br/calculo/calcularV2",
-                    json=payload, headers=headers, timeout=60.0
-                )
-
-                if response.status_code in [200, 201]:
-                    banco_de_tickets[ticket_id] = {"status": "concluido", "resultados": response.json()}
-                    print(f"[{ticket_id}] Sucesso!")
-                else:
-                    raise Exception(f"Erro API: {response.status_code}")
+            else:
+                raise Exception(f"Erro no cálculo API: {res_calc.status_code} - {res_calc.text}")
 
     except Exception as e:
-        print(f"[{ticket_id}] ERRO: {e}")
+        print(f"[{ticket_id}] ERRO NO SCRAPING: {e}")
         banco_de_tickets[ticket_id] = {"status": "erro", "erro": str(e)}
 
 @app.post("/api/iniciar-cotacao")
