@@ -41,7 +41,6 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
 
     try:
         async with async_playwright() as p:
-            # FORÇAMOS UMA RESOLUÇÃO DE MONITOR GRANDE PARA EVITAR MENUS DE TELEMÓVEL
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(viewport={'width': 1920, 'height': 1080})
             page = await context.new_page()
@@ -56,22 +55,26 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
             await page.locator("button:has-text('Entrar')").click()
 
             await page.wait_for_load_state("networkidle")
-            print(f"[{ticket_id}] Login efetuado com sucesso!")
+            print(f"[{ticket_id}] Login concluído. URL Atual: {page.url}")
 
-            # --- ETAPA 2: NAVEGAÇÃO HUMANA ---
+            # --- ETAPA 2: NAVEGAÇÃO HUMANA (CORRIGIDA) ---
             print(f"[{ticket_id}] Navegando pelo menu visual (Nova Cotação -> Carro)...")
             
-            # Procura de forma mais robusta em todo o ecrã alargado
-            btn_nova_cotacao = page.locator("text='Nova Cotação'").first
+            # Utilizando o get_by_text nativo do Playwright
+            btn_nova_cotacao = page.get_by_text("Nova Cotação").first
             await btn_nova_cotacao.wait_for(state="visible", timeout=15000)
             await btn_nova_cotacao.click()
 
-            btn_carro = page.locator("text='Carro'").first
+            btn_carro = page.get_by_text("Carro").first
             await btn_carro.wait_for(state="visible", timeout=10000)
             await btn_carro.click()
             
+            # Aguarda o redirecionamento para o formulário
+            await page.wait_for_load_state("networkidle")
+            print(f"[{ticket_id}] Formulário aberto. URL Atual: {page.url}")
+
             # --- ETAPA 3: PREENCHIMENTO DE ALTA PRECISÃO ---
-            print(f"[{ticket_id}] Formulário aberto. Iniciando injeção de dados...")
+            print(f"[{ticket_id}] Iniciando injeção de dados...")
 
             try:
                 print(f"[{ticket_id}] Aguardando campo de CPF...")
