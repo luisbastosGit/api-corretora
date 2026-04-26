@@ -57,15 +57,24 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
             await page.wait_for_load_state("networkidle")
             print(f"[{ticket_id}] Login efetuado com sucesso!")
 
-            # --- ETAPA 2: NAVEGAÇÃO AO FORMULÁRIO ---
-            print(f"[{ticket_id}] Saltando para o Formulário de Automóvel...")
-            await page.goto("https://aggilizador.com.br/cotacao/auto/formulario")
+            # --- ETAPA 2: NAVEGAÇÃO HUMANA (Anti-bloqueio do Angular) ---
+            print(f"[{ticket_id}] Navegando pelo menu visual (Nova Cotação -> Carro)...")
+            
+            # Procura o botão que contém o texto "Nova Cotação" e clica nele
+            btn_nova_cotacao = page.locator("text=Nova Cotação").first
+            await btn_nova_cotacao.wait_for(state="visible", timeout=15000)
+            await btn_nova_cotacao.click()
+
+            # Procura a opção "Carro" no menu suspenso e clica
+            btn_carro = page.locator("text=Carro").first
+            await btn_carro.wait_for(state="visible", timeout=10000)
+            await btn_carro.click()
             
             # --- ETAPA 3: PREENCHIMENTO DE ALTA PRECISÃO ---
-            print(f"[{ticket_id}] Iniciando injeção de dados...")
+            print(f"[{ticket_id}] Formulário aberto. Iniciando injeção de dados...")
 
             try:
-                # 1. Mira a Laser no CPF usando o padrão de Test ID
+                # 1. Mira a Laser no CPF (Confirmado pelo seu código)
                 print(f"[{ticket_id}] Aguardando campo de CPF...")
                 cpf_locator = page.locator('[data-testid="input_cpf-cnpj"]')
                 await cpf_locator.wait_for(state="visible", timeout=15000)
@@ -74,7 +83,7 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                 await cpf_locator.fill(dados_cliente['cpf'])
                 await page.keyboard.press("Tab") 
                 
-                # 2. Sentinela de Processamento usando a sua captura exata (Imagem 1)
+                # 2. Sentinela de Processamento do Nome
                 nome_locator = page.locator('[data-testid="input_nome-segurado"]')
                 print(f"[{ticket_id}] Aguardando Aggilizador processar o CPF...")
                 
@@ -91,7 +100,7 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                     print(f"[{ticket_id}] Aviso: O sistema demorou muito. Forçando preenchimento manual do Nome...")
                     await nome_locator.fill(dados_cliente['nome'])
 
-                # 3. Preenchimento Temporário (Até termos os Test IDs exatos)
+                # 3. Preenchimento Temporário dos demais
                 print(f"[{ticket_id}] Inserindo Contatos e Veículo...")
                 
                 try:
@@ -99,14 +108,14 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                     await page.get_by_label("Email").fill(dados_cliente['email'])
                     await page.get_by_label("Placa").fill(dados_cliente['placa'])
                     await page.keyboard.press("Tab")
-                    print(f"[{ticket_id}] Dados preenchidos com sucesso!")
+                    print(f"[{ticket_id}] Dados secundários preenchidos!")
                 except Exception as erro_secundario:
-                    print(f"[{ticket_id}] Falha ao preencher campos secundários sem o ID exato. Erro: {erro_secundario}")
+                    print(f"[{ticket_id}] Falha ao preencher campos secundários. Precisaremos dos códigos HTML deles. Erro: {erro_secundario}")
 
             except Exception as loc_erro:
                 print(f"[{ticket_id}] ALERTA CRÍTICO DE SELETOR. Erro: {loc_erro}")
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(5) # Pausa para acompanharmos nos logs do Render
             await browser.close()
 
             banco_de_tickets[ticket_id] = {
