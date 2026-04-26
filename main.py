@@ -2,6 +2,7 @@ import os
 import uuid
 import asyncio
 import httpx
+import json
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,51 +36,57 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=True, args=["--disable-gpu", "--no-sandbox"])
             context = await browser.new_context()
             page = await context.new_page()
 
+            # OTIMIZAÇÃO: Bloqueia carregamento de imagens e fontes para economizar RAM
+            await page.route("**/*.{png,jpg,jpeg,gif,svg,woff,pdf,css}", lambda route: route.abort())
+
             # --- LOGIN ---
-            print(f"[{ticket_id}] Fazendo login...")
-            await page.goto("https://aggilizador.com.br/login")
+            print(f"[{ticket_id}] Iniciando login rápido...")
+            await page.goto("https://aggilizador.com.br/login", wait_until="domcontentloaded")
+            
             await page.locator("input[type='email']").fill(USUARIO_AGG)
             await page.locator("input[type='password']").fill(SENHA_AGG)
+            
+            # Clica e aguarda a mudança de URL (que indica sucesso no login)
             await page.locator("button:has-text('Entrar')").click()
             
-            # Aguarda o redirecionamento pós-login para o Dashboard
-            await page.wait_for_url("**/cotacoes", timeout=30000)
-            print(f"[{ticket_id}] Dashboard alcançado. Extraindo credenciais da memória...")
+            print(f"[{ticket_id}] Aguardando autorização...")
+            try:
+                # Espera a URL mudar para qualquer coisa que não seja /login
+                await page.wait_for_function("() => !window.location.href.includes('login')", timeout=20000)
+            except:
+                print(f"[{ticket_id}] Timeout na mudança de URL, tentando extração forçada...")
 
-            # --- EXTRAÇÃO ATIVA DO TOKEN ---
-            # Este script busca o token no LocalStorage do navegador
+            # --- EXTRAÇÃO DO TOKEN ---
             token_jwt = await page.evaluate("""() => {
-                const authData = localStorage.getItem('auth-storage'); // Nome comum em apps Angular
-                if (authData) return JSON.parse(authData).token;
-                
-                // Plano B: Tentar todas as chaves do LocalStorage que pareçam JWT
                 for (let i = 0; i < localStorage.length; i++) {
                     const key = localStorage.key(i);
                     const val = localStorage.getItem(key);
-                    if (val && val.includes('eyJ')) return val.replace(/\"/g, "");
+                    if (val && val.includes('eyJ')) {
+                        try {
+                            const parsed = JSON.parse(val);
+                            return parsed.token || val;
+                        } catch { return val.replace(/\"/g, ""); }
+                    }
                 }
                 return null;
             }""")
 
-            if not token_jwt:
-                raise Exception("Token JWT não encontrado no LocalStorage após login.")
-
-            # Limpeza do token (garante que não tenha 'Bearer ' duplicado)
-            if not token_jwt.startswith("eyJ"):
-                 token_jwt = token_jwt.split(" ")[-1]
-
-            print(f"[{ticket_id}] Token extraído com sucesso!")
             await browser.close()
+
+            if not token_jwt:
+                raise Exception("Token não capturado. Verifique as credenciais.")
+
+            print(f"[{ticket_id}] Token OK. Disparando cálculo...")
 
             # --- CÁLCULO VIA API ---
             banco_de_tickets[ticket_id] = {"status": "calculando"}
             async with httpx.AsyncClient() as client:
                 headers = {
-                    "authorization": f"{token_jwt}",
+                    "authorization": f"Bearer {token_jwt}" if "Bearer" not in token_jwt else token_jwt,
                     "content-type": "application/json",
                     "origin": "https://aggilizador.com.br"
                 }
@@ -97,7 +104,9 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                         "automoveis": [{
                             "placa": dados_cliente['placa'],
                             "fipe": "0242349",
-                            "cepPernoite": "89703166"
+                            "cepPernoite": "89703166",
+                            "anoFabricacao": 2018,
+                            "anoModelo": 2019
                         }],
                         "tipo": 5,
                         "ramo": 31
@@ -117,9 +126,9 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                         "resultados": response.json(),
                         "link_pdf": "OK"
                     }
-                    print(f"[{ticket_id}] Cálculo finalizado via API!")
+                    print(f"[{ticket_id}] Sucesso total!")
                 else:
-                    raise Exception(f"Erro API: {response.status_code} - {response.text}")
+                    raise Exception(f"Erro API: {response.status_code}")
 
     except Exception as e:
         print(f"[{ticket_id}] ERRO: {e}")
