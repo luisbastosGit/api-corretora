@@ -2,7 +2,6 @@ import os
 import uuid
 import asyncio
 import httpx
-import json
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,53 +39,54 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
             context = await browser.new_context()
             page = await context.new_page()
 
-            # OTIMIZAÇÃO: Bloqueia carregamento de imagens e fontes para economizar RAM
+            # Bloqueia lixo visual para salvar RAM
             await page.route("**/*.{png,jpg,jpeg,gif,svg,woff,pdf,css}", lambda route: route.abort())
 
             # --- LOGIN ---
-            print(f"[{ticket_id}] Iniciando login rápido...")
+            print(f"[{ticket_id}] Acessando página de login...")
             await page.goto("https://aggilizador.com.br/login", wait_until="domcontentloaded")
             
-            await page.locator("input[type='email']").fill(USUARIO_AGG)
-            await page.locator("input[type='password']").fill(SENHA_AGG)
+            # Preenche usando type (mais lento/humano) em vez de fill
+            await page.locator("input[type='email']").type(USUARIO_AGG, delay=50)
+            await page.locator("input[type='password']").type(SENHA_AGG, delay=50)
             
-            # Clica e aguarda a mudança de URL (que indica sucesso no login)
-            await page.locator("button:has-text('Entrar')").click()
+            print(f"[{ticket_id}] Disparando login via teclado...")
+            await page.keyboard.press("Enter")
             
-            print(f"[{ticket_id}] Aguardando autorização...")
-            try:
-                # Espera a URL mudar para qualquer coisa que não seja /login
-                await page.wait_for_function("() => !window.location.href.includes('login')", timeout=20000)
-            except:
-                print(f"[{ticket_id}] Timeout na mudança de URL, tentando extração forçada...")
-
-            # --- EXTRAÇÃO DO TOKEN ---
-            token_jwt = await page.evaluate("""() => {
-                for (let i = 0; i < localStorage.length; i++) {
-                    const key = localStorage.key(i);
-                    const val = localStorage.getItem(key);
-                    if (val && val.includes('eyJ')) {
-                        try {
-                            const parsed = JSON.parse(val);
-                            return parsed.token || val;
-                        } catch { return val.replace(/\"/g, ""); }
+            # Tenta capturar o token por 20 segundos
+            token_jwt = None
+            for i in range(20):
+                token_jwt = await page.evaluate("""() => {
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const key = localStorage.key(i);
+                        const val = localStorage.getItem(key);
+                        if (val && val.includes('eyJ')) return val;
                     }
-                }
-                return null;
-            }""")
-
-            await browser.close()
+                    return null;
+                }""")
+                if token_jwt: break
+                await asyncio.sleep(1)
 
             if not token_jwt:
-                raise Exception("Token não capturado. Verifique as credenciais.")
+                # Se falhar, vamos ver se há mensagem de erro na tela
+                msg_erro = await page.locator(".mat-error, .alert").text_content() if await page.locator(".mat-error, .alert").count() > 0 else "Nenhuma msg visível"
+                raise Exception(f"Token não capturado. Erro na tela: {msg_erro}")
 
-            print(f"[{ticket_id}] Token OK. Disparando cálculo...")
+            # Limpa o token se ele vier como objeto JSON
+            if '"token":"' in token_jwt:
+                import json
+                try: token_jwt = json.loads(token_jwt)['token']
+                except: pass
+            
+            token_jwt = token_jwt.replace('"', '')
+            print(f"[{ticket_id}] Autenticado! Iniciando API de cálculo...")
+            await browser.close()
 
             # --- CÁLCULO VIA API ---
             banco_de_tickets[ticket_id] = {"status": "calculando"}
             async with httpx.AsyncClient() as client:
                 headers = {
-                    "authorization": f"Bearer {token_jwt}" if "Bearer" not in token_jwt else token_jwt,
+                    "authorization": f"Bearer {token_jwt}" if "eyJ" in token_jwt else token_jwt,
                     "content-type": "application/json",
                     "origin": "https://aggilizador.com.br"
                 }
@@ -98,35 +98,26 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
                             "cpfCnpj": dados_cliente['cpf'],
                             "fone1": dados_cliente['telefone'],
                             "email": dados_cliente['email'],
-                            "tipoPessoa": "F",
-                            "sexo": "M"
+                            "tipoPessoa": "F", "sexo": "M"
                         },
                         "automoveis": [{
                             "placa": dados_cliente['placa'],
                             "fipe": "0242349",
                             "cepPernoite": "89703166",
-                            "anoFabricacao": 2018,
-                            "anoModelo": 2019
+                            "anoFabricacao": 2018, "anoModelo": 2019
                         }],
-                        "tipo": 5,
-                        "ramo": 31
+                        "tipo": 5, "ramo": 31
                     }
                 }
 
                 response = await client.post(
                     "https://api-prod.aggilizador.com.br/calculo/calcularV2",
-                    json=payload,
-                    headers=headers,
-                    timeout=60.0
+                    json=payload, headers=headers, timeout=60.0
                 )
 
                 if response.status_code in [200, 201]:
-                    banco_de_tickets[ticket_id] = {
-                        "status": "concluido",
-                        "resultados": response.json(),
-                        "link_pdf": "OK"
-                    }
-                    print(f"[{ticket_id}] Sucesso total!")
+                    banco_de_tickets[ticket_id] = {"status": "concluido", "resultados": response.json()}
+                    print(f"[{ticket_id}] Sucesso!")
                 else:
                     raise Exception(f"Erro API: {response.status_code}")
 
