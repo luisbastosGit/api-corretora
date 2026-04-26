@@ -34,9 +34,7 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
     SENHA_AGG = os.getenv("AGG_SENHA")
 
     if not USUARIO_AGG or not SENHA_AGG:
-        erro_msg = "Credenciais não encontradas nas Variáveis de Ambiente."
-        print(f"[{ticket_id}] ERRO: {erro_msg}")
-        banco_de_tickets[ticket_id] = {"status": "erro", "erro": erro_msg}
+        banco_de_tickets[ticket_id] = {"status": "erro", "erro": "Credenciais ausentes."}
         return
 
     try:
@@ -45,99 +43,82 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
             context = await browser.new_context(viewport={'width': 1920, 'height': 1080})
             page = await context.new_page()
 
-            # --- ETAPA 1: LOGIN ---
-            print(f"[{ticket_id}] Acessando portal Aggilizador...")
-            banco_de_tickets[ticket_id] = {"status": "fazendo login"}
+            # --- LOGIN ---
             await page.goto("https://aggilizador.com.br/login")
-
             await page.locator("input[type='email']").fill(USUARIO_AGG)
             await page.locator("input[type='password']").fill(SENHA_AGG)
             await page.locator("button:has-text('Entrar')").click()
-
-            await page.wait_for_load_state("networkidle")
-            print(f"[{ticket_id}] Login concluído. URL Atual: {page.url}")
-
-            # --- ETAPA 2: NAVEGAÇÃO HUMANA (CORRIGIDA) ---
-            print(f"[{ticket_id}] Navegando pelo menu visual (Nova Cotação -> Carro)...")
             
-            # Utilizando o get_by_text nativo do Playwright
-            btn_nova_cotacao = page.get_by_text("Nova Cotação").first
-            await btn_nova_cotacao.wait_for(state="visible", timeout=15000)
-            await btn_nova_cotacao.click()
-
-            btn_carro = page.get_by_text("Carro").first
-            await btn_carro.wait_for(state="visible", timeout=10000)
-            await btn_carro.click()
-            
-            # Aguarda o redirecionamento para o formulário
+            # Aguarda a transição do login
             await page.wait_for_load_state("networkidle")
-            print(f"[{ticket_id}] Formulário aberto. URL Atual: {page.url}")
+            await asyncio.sleep(3) # Delay de segurança pós-login
 
-            # --- ETAPA 3: PREENCHIMENTO DE ALTA PRECISÃO ---
-            print(f"[{ticket_id}] Iniciando injeção de dados...")
-
+            # --- O SALTO ---
+            print(f"[{ticket_id}] Saltando para o formulário...")
+            await page.goto("https://aggilizador.com.br/cotacao/auto/formulario")
+            
+            # Delay estratégico para o Angular "tentar" carregar
+            await asyncio.sleep(4) 
+            
+            print(f"[{ticket_id}] Aplicando Refresh (F5) para destravar componentes...")
+            await page.reload(wait_until="networkidle")
+            
+            # --- PREENCHIMENTO COM ESPERA ATIVA ---
             try:
-                print(f"[{ticket_id}] Aguardando campo de CPF...")
+                print(f"[{ticket_id}] Aguardando campo CPF (máx 20s)...")
                 cpf_locator = page.locator('[data-testid="input_cpf-cnpj"]')
-                await cpf_locator.wait_for(state="visible", timeout=15000)
                 
-                print(f"[{ticket_id}] Preenchendo CPF...")
+                # Espera o campo ficar visível e estável
+                await cpf_locator.wait_for(state="visible", timeout=20000)
+                await asyncio.sleep(1) # Pequena pausa para garantir que o JS anexou os eventos ao campo
+                
+                print(f"[{ticket_id}] SUCESSO! Inserindo dados...")
+                await cpf_locator.click() # Clicar antes de preencher ajuda em campos Angular
                 await cpf_locator.fill(dados_cliente['cpf'])
                 await page.keyboard.press("Tab") 
                 
+                # Aguarda o processamento do CPF pelo sistema
                 nome_locator = page.locator('[data-testid="input_nome-segurado"]')
-                print(f"[{ticket_id}] Aguardando Aggilizador processar o CPF...")
-                
                 tentativas = 0
-                while tentativas < 15:
+                while tentativas < 20:
                     nome_atual = await nome_locator.input_value()
                     if nome_atual and len(nome_atual) > 2:
-                        print(f"[{ticket_id}] Sucesso! Sistema carregou os dados do cliente: {nome_atual}")
+                        print(f"[{ticket_id}] Dados do cliente recuperados: {nome_atual}")
                         break
                     await asyncio.sleep(1)
                     tentativas += 1
                 
-                if tentativas == 15:
-                    print(f"[{ticket_id}] Aviso: O sistema demorou muito. Forçando preenchimento manual do Nome...")
+                if tentativas == 20:
                     await nome_locator.fill(dados_cliente['nome'])
 
-                print(f"[{ticket_id}] Inserindo Contatos e Veículo...")
+                # Demais campos com pequenas esperas entre eles
+                await page.get_by_label("Telefone").fill(dados_cliente['telefone'])
+                await asyncio.sleep(0.5)
+                await page.get_by_label("Email").fill(dados_cliente['email'])
+                await asyncio.sleep(0.5)
+                await page.get_by_label("Placa").fill(dados_cliente['placa'])
+                await page.keyboard.press("Tab")
                 
-                try:
-                    await page.get_by_label("Telefone").fill(dados_cliente['telefone'])
-                    await page.get_by_label("Email").fill(dados_cliente['email'])
-                    await page.get_by_label("Placa").fill(dados_cliente['placa'])
-                    await page.keyboard.press("Tab")
-                    print(f"[{ticket_id}] Dados secundários preenchidos!")
-                except Exception as erro_secundario:
-                    print(f"[{ticket_id}] Falha ao preencher campos secundários. Erro: {erro_secundario}")
+                print(f"[{ticket_id}] Preenchimento concluído com sucesso.")
 
             except Exception as loc_erro:
-                print(f"[{ticket_id}] ALERTA CRÍTICO DE SELETOR. Erro: {loc_erro}")
+                print(f"[{ticket_id}] Erro de carregamento/delay: {loc_erro}")
 
             await asyncio.sleep(5)
             await browser.close()
-
-            banco_de_tickets[ticket_id] = {
-                "status": "concluido",
-                "link_pdf": "TESTE_FORMULARIO_OK"
-            }
+            banco_de_tickets[ticket_id] = {"status": "concluido", "link_pdf": "OK"}
 
     except Exception as e:
-        print(f"[{ticket_id}] ERRO FATAL no processo: {e}")
+        print(f"[{ticket_id}] ERRO: {e}")
         banco_de_tickets[ticket_id] = {"status": "erro", "erro": str(e)}
 
 @app.post("/api/iniciar-cotacao")
 async def iniciar_cotacao(dados: DadosCotacao, background_tasks: BackgroundTasks):
     ticket_id = str(uuid.uuid4())
     banco_de_tickets[ticket_id] = {"status": "processando"}
-    
     background_tasks.add_task(tarefa_do_robo, ticket_id, dados.dict())
-    return {"ticket": ticket_id, "mensagem": "Dados recebidos, robô acionado!"}
+    return {"ticket": ticket_id, "mensagem": "Processo iniciado!"}
 
 @app.get("/api/status-cotacao/{ticket_id}")
 async def checar_status(ticket_id: str):
-    resultado = banco_de_tickets.get(ticket_id)
-    if not resultado:
-        return {"erro": "Ticket não encontrado."}
-    return resultado
+    return banco_de_tickets.get(ticket_id, {"erro": "Não encontrado."})
