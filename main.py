@@ -45,7 +45,7 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
             context = await browser.new_context()
             page = await context.new_page()
 
-            # --- ETAPA 1: LOGIN SEGURADO ---
+            # --- ETAPA 1: LOGIN ---
             print(f"[{ticket_id}] Acessando portal Aggilizador...")
             banco_de_tickets[ticket_id] = {"status": "fazendo login"}
             await page.goto("https://aggilizador.com.br/login")
@@ -61,52 +61,51 @@ async def tarefa_do_robo(ticket_id: str, dados_cliente: dict):
             print(f"[{ticket_id}] Saltando para o Formulário de Automóvel...")
             await page.goto("https://aggilizador.com.br/cotacao/auto/formulario")
             
-            # --- ETAPA 3: PREENCHIMENTO INTELIGENTE (SENTINELAS) ---
+            # --- ETAPA 3: PREENCHIMENTO DE ALTA PRECISÃO ---
             print(f"[{ticket_id}] Iniciando injeção de dados...")
 
             try:
-                # 1. Sentinela de Presença: Aguarda o campo de CPF existir e estar pronto
-                cpf_locator = page.get_by_label("CPF / CNPJ*")
+                # 1. Mira a Laser no CPF usando o padrão de Test ID
+                print(f"[{ticket_id}] Aguardando campo de CPF...")
+                cpf_locator = page.locator('[data-testid="input_cpf-cnpj"]')
                 await cpf_locator.wait_for(state="visible", timeout=15000)
                 
-                # 2. Injeta o CPF e aciona a busca do sistema
-                print(f"[{ticket_id}] Preenchendo CPF e acionando busca do sistema...")
+                print(f"[{ticket_id}] Preenchendo CPF...")
                 await cpf_locator.fill(dados_cliente['cpf'])
-                await page.keyboard.press("Tab") # Dispara o evento de "sair do campo" que costuma carregar os dados
+                await page.keyboard.press("Tab") 
                 
-                # 3. Sentinela de Processamento: Observa o campo 'Nome Completo*'
-                nome_locator = page.get_by_label("Nome Completo*")
+                # 2. Sentinela de Processamento usando a sua captura exata (Imagem 1)
+                nome_locator = page.locator('[data-testid="input_nome-segurado"]')
                 print(f"[{ticket_id}] Aguardando Aggilizador processar o CPF...")
                 
                 tentativas = 0
-                while tentativas < 15: # Espera no máximo 15 segundos
+                while tentativas < 15:
                     nome_atual = await nome_locator.input_value()
                     if nome_atual and len(nome_atual) > 2:
-                        print(f"[{ticket_id}] Sistema carregou os dados do cliente: {nome_atual}")
+                        print(f"[{ticket_id}] Sucesso! Sistema carregou os dados do cliente: {nome_atual}")
                         break
-                    await asyncio.sleep(1) # Lê o campo, dorme 1s, tenta de novo
+                    await asyncio.sleep(1)
                     tentativas += 1
                 
                 if tentativas == 15:
-                    print(f"[{ticket_id}] Aviso: O sistema demorou muito a retornar o Nome. Forçando preenchimento manual...")
+                    print(f"[{ticket_id}] Aviso: O sistema demorou muito. Forçando preenchimento manual do Nome...")
                     await nome_locator.fill(dados_cliente['nome'])
 
-                # 4. Continua o preenchimento apenas após a "tempestade" de carregamento passar
+                # 3. Preenchimento Temporário (Até termos os Test IDs exatos)
                 print(f"[{ticket_id}] Inserindo Contatos e Veículo...")
-                await page.get_by_label("Telefone").fill(dados_cliente['telefone'])
-                await page.get_by_label("Email").fill(dados_cliente['email'])
-                await page.get_by_label("Placa").fill(dados_cliente['placa'])
                 
-                # Clica fora ou aperta Tab para garantir que a placa também processe
-                await page.keyboard.press("Tab")
-                await page.wait_for_load_state("networkidle")
-                
-                print(f"[{ticket_id}] Todos os dados iniciais foram injetados com sucesso!")
+                try:
+                    await page.get_by_label("Telefone").fill(dados_cliente['telefone'])
+                    await page.get_by_label("Email").fill(dados_cliente['email'])
+                    await page.get_by_label("Placa").fill(dados_cliente['placa'])
+                    await page.keyboard.press("Tab")
+                    print(f"[{ticket_id}] Dados preenchidos com sucesso!")
+                except Exception as erro_secundario:
+                    print(f"[{ticket_id}] Falha ao preencher campos secundários sem o ID exato. Erro: {erro_secundario}")
 
             except Exception as loc_erro:
-                print(f"[{ticket_id}] ALERTA DE SELETOR: O formulário blindou os rótulos. Precisaremos dos IDs. Erro: {loc_erro}")
+                print(f"[{ticket_id}] ALERTA CRÍTICO DE SELETOR. Erro: {loc_erro}")
 
-            # Mantemos o navegador aberto por uns segundos para garantir que a rede terminou de falar
             await asyncio.sleep(5)
             await browser.close()
 
